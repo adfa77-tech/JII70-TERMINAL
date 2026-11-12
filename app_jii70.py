@@ -145,8 +145,6 @@ if "quick_filter" not in st.session_state:
 if "view_mode" not in st.session_state:
   st.session_state.view_mode = "table"
 
-BROKERS = ["XL", "XC", "AK", "BK", "YP", "CC", "YU", "ZP", "PD", "GR"]
-
 
 def compute_scalping_indicators_m5(df):
   close = df["Close"]
@@ -189,7 +187,6 @@ def compute_scalping_indicators_m5(df):
 
 def evaluate_scalping_strategy(ticker_str, df, change_pct):
   c = float(df["Close"].iloc[-1])
-  vol = float(df["Volume"].iloc[-1])
   
   ema20 = float(df["EMA20"].iloc[-1])
   ema50 = float(df["EMA50"].iloc[-1])
@@ -198,18 +195,12 @@ def evaluate_scalping_strategy(ticker_str, df, change_pct):
   stoch_k = float(df["Stoch_K"].iloc[-1])
   stoch_d = float(df["Stoch_D"].iloc[-1])
   bb_width = float(df["BB_Width"].iloc[-1])
-  vwap = float(df["VWAP"].iloc[-1])
   atr = float(df["ATR14"].iloc[-1])
 
   is_above_ema200 = c > ema200
   is_ribbon_bullish = ema20 > ema50
   stoch_buy_trigger = (stoch_k > 20) and (df["Stoch_K"].iloc[-2] <= 20 or stoch_k > stoch_d)
   rsi_buy_filter = rsi9 > 50
-
-  rng = random.Random(ticker_str + str(round(change_pct, 2)))
-  accum_brokers = rng.sample(BROKERS, 2)
-  broker_str = f"{accum_brokers[0]} & {accum_brokers[1]}"
-  bid_ratio = round(rng.uniform(1.2, 4.5), 1)
 
   if is_above_ema200 and is_ribbon_bullish and stoch_buy_trigger and rsi_buy_filter:
     signal = "BUY"
@@ -238,8 +229,6 @@ def evaluate_scalping_strategy(ticker_str, df, change_pct):
       momentum_score,
       int(rsi9),
       round(bb_width, 2),
-      bid_ratio,
-      broker_str,
       buy_point,
       target_price,
       stop_loss,
@@ -279,8 +268,6 @@ def load_market_data_fast():
           momentum_score,
           rsi9,
           bb_width,
-          bid_ratio,
-          broker_str,
           buy_point,
           target_p,
           stop_loss,
@@ -300,8 +287,6 @@ def load_market_data_fast():
           "Skor Momentum": momentum_score,
           "RSI (9)": rsi9,
           "BB Width": bb_width,
-          "Bid/Offer Ratio": f"{bid_ratio}x",
-          "Broker Akum": broker_str,
           "RawData": df,
           "ChangeVal": change_pct,
       }
@@ -568,7 +553,7 @@ if st.session_state.matrix_data_all:
       st.markdown(f"**Stop Loss:** <span style='color:#ef4444; font-weight:bold;'>Rp {selected_item['Stop Loss']}</span>", unsafe_allow_html=True)
       st.markdown(f'<a href="{stockbit_url}" target="_blank"><button style="width: 100%; background-color: #059669; color: white; border: none; padding: 6px; border-radius: 6px; font-weight: bold; cursor: pointer; margin-top: 4px;">🚀 Stockbit</button></a>', unsafe_allow_html=True)
 
-    st.markdown(f"**Alasan Alasan:** {selected_item['Alasan Aksi']}")
+    st.markdown(f"**Alasan Aksi:** {selected_item['Alasan Aksi']}")
     
     if st.button("📊 Buka Chart Lengkap Emiten Ini"):
       st.session_state.view_mode = "chart"
