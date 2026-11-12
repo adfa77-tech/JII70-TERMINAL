@@ -149,49 +149,35 @@ BROKERS = ["XL", "XC", "AK", "BK", "YP", "CC", "YU", "ZP", "PD", "GR"]
 
 
 def compute_scalping_indicators_m5(df):
-  """Menghitung indikator khusus Scalping M5:
-
-  - EMA 20, 50, 200 (Tren & Ribbon)
-  - RSI (Periode 9 yang responsif untuk M5)
-  - Stochastic Oscillator (Default %K & %D)
-  - Bollinger Bands (Volatilitas & Lebar Pita)
-  - VWAP (Volume Weighted Average Price)
-  """
   close = df["Close"]
   high = df["High"]
   low = df["Low"]
   vol = df["Volume"]
 
-  # EMA Filter Utama
   df["EMA20"] = close.ewm(span=20, adjust=False).mean()
   df["EMA50"] = close.ewm(span=50, adjust=False).mean()
   df["EMA200"] = close.ewm(span=200, adjust=False).mean() if len(df) >= 200 else close.ewm(span=len(df), adjust=False).mean()
 
-  # Bollinger Bands (Periode 20, Std Dev 2)
   sma20 = close.rolling(window=20).mean()
   std20 = close.rolling(window=20).std()
   df["BB_Upper"] = sma20 + (std20 * 2)
   df["BB_Lower"] = sma20 - (std20 * 2)
-  df["BB_Width"] = (df["BB_Upper"] - df["BB_Lower"]) / sma20 * 100  # Mengukur penyempitan/pelebaran pita
+  df["BB_Width"] = (df["BB_Upper"] - df["BB_Lower"]) / sma20 * 100
 
-  # RSI Responsif M5 (Periode 9)
   delta = close.diff()
   gain = (delta.where(delta > 0, 0)).rolling(window=9).mean()
   loss = (-delta.where(delta < 0, 0)).rolling(window=9).mean()
   rs_val = gain / loss
   df["RSI9"] = 100 - (100 / (1 + rs_val))
 
-  # Stochastic Oscillator (Default 14, 3, 3)
   low14 = low.rolling(window=14).min()
   high14 = high.rolling(window=14).max()
   df["Stoch_K"] = np.where((high14 - low14) != 0, 100 * ((close - low14) / (high14 - low14)), 50)
   df["Stoch_D"] = df["Stoch_K"].rolling(window=3).mean()
 
-  # VWAP (Volume Weighted Average Price Harian / Kumulatif Sederhana)
   typical_price = (high + low + close) / 3
   df["VWAP"] = (typical_price * vol).cumsum() / vol.cumsum()
 
-  # ATR untuk Stop Loss
   tr1 = high - low
   tr2 = (high - close.shift()).abs()
   tr3 = (low - close.shift()).abs()
@@ -204,7 +190,6 @@ def compute_scalping_indicators_m5(df):
 def evaluate_scalping_strategy(ticker_str, df, change_pct):
   c = float(df["Close"].iloc[-1])
   vol = float(df["Volume"].iloc[-1])
-  vol_lots = int(vol / 100)
   
   ema20 = float(df["EMA20"].iloc[-1])
   ema50 = float(df["EMA50"].iloc[-1])
@@ -216,24 +201,15 @@ def evaluate_scalping_strategy(ticker_str, df, change_pct):
   vwap = float(df["VWAP"].iloc[-1])
   atr = float(df["ATR14"].iloc[-1])
 
-  # Logika Aturan Scalping M5:
-  # 1. Trend Filter: C di atas EMA200 (Bullish Makro)
   is_above_ema200 = c > ema200
-  # 2. Ribbon EMA: EMA20 > EMA50 (Expanding / Bullish Momentum)
   is_ribbon_bullish = ema20 > ema50
-  # 3. Stochastic Trigger: Stochastic baru keluar dari oversold (<20) menyilang ke atas, atau RSI > 50
   stoch_buy_trigger = (stoch_k > 20) and (df["Stoch_K"].iloc[-2] <= 20 or stoch_k > stoch_d)
   rsi_buy_filter = rsi9 > 50
-  # 4. VWAP Filter: Harga mendekati atau di atas VWAP (wajar/menarik dibeli)
-  near_vwap = c >= vwap * 0.995
 
   rng = random.Random(ticker_str + str(round(change_pct, 2)))
   accum_brokers = rng.sample(BROKERS, 2)
   broker_str = f"{accum_brokers[0]} & {accum_brokers[1]}"
   bid_ratio = round(rng.uniform(1.2, 4.5), 1)
-
-  alert_msg = None
-  warning_msg = None
 
   if is_above_ema200 and is_ribbon_bullish and stoch_buy_trigger and rsi_buy_filter:
     signal = "BUY"
@@ -264,8 +240,6 @@ def evaluate_scalping_strategy(ticker_str, df, change_pct):
       round(bb_width, 2),
       bid_ratio,
       broker_str,
-      alert_msg,
-      warning_msg,
       buy_point,
       target_price,
       stop_loss,
@@ -307,8 +281,6 @@ def load_market_data_fast():
           bb_width,
           bid_ratio,
           broker_str,
-          alert_msg,
-          warning_msg,
           buy_point,
           target_p,
           stop_loss,
@@ -330,8 +302,6 @@ def load_market_data_fast():
           "BB Width": bb_width,
           "Bid/Offer Ratio": f"{bid_ratio}x",
           "Broker Akum": broker_str,
-          "Alert": alert_msg,
-          "Warning": warning_msg,
           "RawData": df,
           "ChangeVal": change_pct,
       }
@@ -570,7 +540,7 @@ if st.session_state.matrix_data_all:
   else:
     st.info("Tidak ada emiten yang sesuai dengan kriteria penyaringan.")
 
-  # --- SECTION DETAIL EMITEN DI HALAMAN DEPAN (PINDAHAN DARI SIDEBAR) ---
+  # --- SECTION DETAIL EMITEN DI HALAMAN DEPAN ---
   st.markdown("<br><hr style='border-color: #38bdf8;'>", unsafe_allow_html=True)
   st.markdown("### 🔍 Panel Detail & Eksekusi Scalping Terpilih")
 
@@ -598,7 +568,7 @@ if st.session_state.matrix_data_all:
       st.markdown(f"**Stop Loss:** <span style='color:#ef4444; font-weight:bold;'>Rp {selected_item['Stop Loss']}</span>", unsafe_allow_html=True)
       st.markdown(f'<a href="{stockbit_url}" target="_blank"><button style="width: 100%; background-color: #059669; color: white; border: none; padding: 6px; border-radius: 6px; font-weight: bold; cursor: pointer; margin-top: 4px;">🚀 Stockbit</button></a>', unsafe_allow_html=True)
 
-    st.markdown(f"**Analisis Alasan:** {selected_item['Alasan Aksi']}")
+    st.markdown(f"**Alasan Alasan:** {selected_item['Alasan Aksi']}")
     
     if st.button("📊 Buka Chart Lengkap Emiten Ini"):
       st.session_state.view_mode = "chart"
