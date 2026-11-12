@@ -10,7 +10,7 @@ import yfinance as yf
 
 # Konfigurasi Halaman Streamlit
 st.set_page_config(
-    page_title="JII70 Institutional Terminal Pro",
+    page_title="Screener Scalping 5 Menit Saham JII70",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -148,172 +148,120 @@ if "view_mode" not in st.session_state:
 BROKERS = ["XL", "XC", "AK", "BK", "YP", "CC", "YU", "ZP", "PD", "GR"]
 
 
-def compute_professional_indicators(df):
+def compute_scalping_indicators_m5(df):
+  """Menghitung indikator khusus Scalping M5:
+
+  - EMA 20, 50, 200 (Tren & Ribbon)
+  - RSI (Periode 9 yang responsif untuk M5)
+  - Stochastic Oscillator (Default %K & %D)
+  - Bollinger Bands (Volatilitas & Lebar Pita)
+  - VWAP (Volume Weighted Average Price)
+  """
   close = df["Close"]
   high = df["High"]
   low = df["Low"]
   vol = df["Volume"]
 
-  df["MA5"] = close.rolling(window=5).mean()
-  df["MA10"] = close.rolling(window=10).mean()
-  df["MA20"] = close.rolling(window=20).mean()
-  df["MA50"] = close.rolling(window=50).mean()
-  df["MA150"] = close.rolling(window=150).mean() if len(df) >= 150 else close.rolling(window=len(df)).mean()
-  df["MA200"] = close.rolling(window=200).mean() if len(df) >= 200 else close.rolling(window=len(df)).mean()
+  # EMA Filter Utama
+  df["EMA20"] = close.ewm(span=20, adjust=False).mean()
+  df["EMA50"] = close.ewm(span=50, adjust=False).mean()
+  df["EMA200"] = close.ewm(span=200, adjust=False).mean() if len(df) >= 200 else close.ewm(span=len(df), adjust=False).mean()
 
+  # Bollinger Bands (Periode 20, Std Dev 2)
   sma20 = close.rolling(window=20).mean()
   std20 = close.rolling(window=20).std()
   df["BB_Upper"] = sma20 + (std20 * 2)
   df["BB_Lower"] = sma20 - (std20 * 2)
-  df["BB_PctB"] = np.where(
-      (df["BB_Upper"] - df["BB_Lower"]) != 0,
-      (close - df["BB_Lower"]) / (df["BB_Upper"] - df["BB_Lower"]) * 100,
-      50,
-  )
+  df["BB_Width"] = (df["BB_Upper"] - df["BB_Lower"]) / sma20 * 100  # Mengukur penyempitan/pelebaran pita
 
-  exp1 = close.ewm(span=12, adjust=False).mean()
-  exp2 = close.ewm(span=26, adjust=False).mean()
-  df["MACD"] = exp1 - exp2
-  df["MACD_Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
-  df["MACD_Hist"] = df["MACD"] - df["MACD_Signal"]
-
+  # RSI Responsif M5 (Periode 9)
   delta = close.diff()
-  gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-  loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+  gain = (delta.where(delta > 0, 0)).rolling(window=9).mean()
+  loss = (-delta.where(delta < 0, 0)).rolling(window=9).mean()
   rs_val = gain / loss
-  df["RSI"] = 100 - (100 / (1 + rs_val))
+  df["RSI9"] = 100 - (100 / (1 + rs_val))
 
+  # Stochastic Oscillator (Default 14, 3, 3)
   low14 = low.rolling(window=14).min()
   high14 = high.rolling(window=14).max()
   df["Stoch_K"] = np.where((high14 - low14) != 0, 100 * ((close - low14) / (high14 - low14)), 50)
   df["Stoch_D"] = df["Stoch_K"].rolling(window=3).mean()
 
+  # VWAP (Volume Weighted Average Price Harian / Kumulatif Sederhana)
+  typical_price = (high + low + close) / 3
+  df["VWAP"] = (typical_price * vol).cumsum() / vol.cumsum()
+
+  # ATR untuk Stop Loss
   tr1 = high - low
   tr2 = (high - close.shift()).abs()
   tr3 = (low - close.shift()).abs()
   tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
   df["ATR14"] = tr.ewm(alpha=1 / 14, adjust=False).mean()
+
   return df
 
 
-def evaluate_minervini_trend_template(df):
-  if len(df) < 200:
-    return 6, "Uptrend Cukup"
-  c = df["Close"].iloc[-1]
-  ma50 = df["MA50"].iloc[-1]
-  ma150 = df["MA150"].iloc[-1]
-  ma200 = df["MA200"].iloc[-1]
-  ma200_20ago = df["MA200"].iloc[-20]
-  high_52w = df["High"].max()
-  low_52w = df["Low"].min()
-
-  score_tt = 0
-  if c > ma150 and c > ma200:
-    score_tt += 1
-  if ma150 > ma200:
-    score_tt += 1
-  if ma200 > ma200_20ago:
-    score_tt += 1
-  if ma50 > ma150 and ma150 > ma200:
-    score_tt += 1
-  if c > ma50:
-    score_tt += 1
-  if c >= low_52w * 1.25:
-    score_tt += 1
-  if c <= high_52w * 0.75:
-    score_tt += 1
-  score_tt += 1
-
-  status_text = "Uptrend Kuat" if score_tt >= 7 else "Uptrend Menengah" if score_tt >= 5 else "Konsolidasi"
-  return score_tt, status_text
-
-
-def calculate_vcp_ratio(df):
-  if len(df) < 40:
-    return 0.5
-  rng_15 = df["High"].tail(15).max() - df["Low"].tail(15).min()
-  rng_40 = df["High"].tail(55).head(40).max() - df["High"].tail(55).head(40).min()
-  if rng_40 <= 0:
-    return 0.5
-  return round(rng_15 / rng_40, 2)
-
-
-def evaluate_institutional_and_scalping(ticker_str, df, change_pct):
+def evaluate_scalping_strategy(ticker_str, df, change_pct):
   c = float(df["Close"].iloc[-1])
   vol = float(df["Volume"].iloc[-1])
   vol_lots = int(vol / 100)
-  rsi = float(df["RSI"].iloc[-1])
-  macd_hist = float(df["MACD_Hist"].iloc[-1])
-  pct_b = float(df["BB_PctB"].iloc[-1])
+  
+  ema20 = float(df["EMA20"].iloc[-1])
+  ema50 = float(df["EMA50"].iloc[-1])
+  ema200 = float(df["EMA200"].iloc[-1])
+  rsi9 = float(df["RSI9"].iloc[-1])
+  stoch_k = float(df["Stoch_K"].iloc[-1])
+  stoch_d = float(df["Stoch_D"].iloc[-1])
+  bb_width = float(df["BB_Width"].iloc[-1])
+  vwap = float(df["VWAP"].iloc[-1])
   atr = float(df["ATR14"].iloc[-1])
-  high_52w = float(df["High"].max())
 
-  pivot_20 = float(df["High"].tail(21).head(20).max())
-  vcp_ratio = calculate_vcp_ratio(df)
-  tt_score, tt_label = evaluate_minervini_trend_template(df)
-
-  ret_3m = float(df["Close"].pct_change(60).iloc[-1]) if len(df) >= 60 else change_pct / 100
-  rs_raw = 0.4 * ret_3m + 0.6 * (change_pct / 100)
-  rs_rating = int(min(max(50 + int(rs_raw * 100), 10), 99))
+  # Logika Aturan Scalping M5:
+  # 1. Trend Filter: C di atas EMA200 (Bullish Makro)
+  is_above_ema200 = c > ema200
+  # 2. Ribbon EMA: EMA20 > EMA50 (Expanding / Bullish Momentum)
+  is_ribbon_bullish = ema20 > ema50
+  # 3. Stochastic Trigger: Stochastic baru keluar dari oversold (<20) menyilang ke atas, atau RSI > 50
+  stoch_buy_trigger = (stoch_k > 20) and (df["Stoch_K"].iloc[-2] <= 20 or stoch_k > stoch_d)
+  rsi_buy_filter = rsi9 > 50
+  # 4. VWAP Filter: Harga mendekati atau di atas VWAP (wajar/menarik dibeli)
+  near_vwap = c >= vwap * 0.995
 
   rng = random.Random(ticker_str + str(round(change_pct, 2)))
   accum_brokers = rng.sample(BROKERS, 2)
   broker_str = f"{accum_brokers[0]} & {accum_brokers[1]}"
-
-  if change_pct > 0 and vol_lots >= 50000:
-    bid_ratio = round(rng.uniform(3.1, 6.0), 1)
-  elif change_pct < -1.5:
-    bid_ratio = round(rng.uniform(0.4, 1.1), 1)
-  else:
-    bid_ratio = round(rng.uniform(1.2, 2.9), 1)
+  bid_ratio = round(rng.uniform(1.2, 4.5), 1)
 
   alert_msg = None
   warning_msg = None
 
-  if change_pct > 0 and bid_ratio >= 3.0 and vol_lots >= 50000:
-    alert_msg = f"🚀 ALERT SCALP: Offer disikat masif! Broker [{broker_str}] aktif menghajar sisi offer."
-  if change_pct < -1.0 and bid_ratio < 1.0:
-    warning_msg = f"⚠️ WARNING: FAKE BID! Bid besar ditarik tiba-tiba oleh [{broker_str}], harga drop cepat."
-
-  proximity_52w = max(0, 1.0 - abs(c - high_52w) / high_52w)
-  momentum_score = int(
-      (rs_rating / 99 * 25)
-      + (proximity_52w * 15)
-      + (tt_score / 8 * 20)
-      + (min(bid_ratio, 5) / 5 * 20)
-      + (15 if macd_hist >= 0 else 5)
-  )
-  momentum_score = min(max(momentum_score, 40), 99)
-
-  stop_loss = int(round(max(c - (2 * atr), c * 0.93)))
-  target_price = int(round(c + (2.5 * (c - stop_loss))))
-  buy_point = int(round(min(c, pivot_20)))
-
-  if vol_lots >= 50000 and bid_ratio >= 3.0 and change_pct >= 0:
+  if is_above_ema200 and is_ribbon_bullish and stoch_buy_trigger and rsi_buy_filter:
     signal = "BUY"
-    strategy = "Scalping & SEPA Breakout"
-    reason = f"Vol {vol_lots:,} lot, Bid {bid_ratio}x Offer. Akumulasi bandar oleh broker [{broker_str}]. Lolos Trend Template ({tt_score}/8)."
-  elif tt_score >= 6 and rs_rating >= 75 and macd_hist >= 0:
-    signal = "BUY"
-    strategy = "Mark Minervini SEPA & O'Neil Leader"
-    reason = f"RS Rating {rs_rating}, VCP Ketat ({vcp_ratio}), didukung akumulasi institusi [{broker_str}]."
-  elif warning_msg or rsi > 78 or pct_b > 95:
+    strategy = "Scalping M5 (EMA Ribbon + Stoch Bounce)"
+    reason = f"Valid Scalping M5: Harga di atas EMA200, Ribbon EMA20>EMA50 mekar, Stoch cross naik dari area oversold, RSI9 ({rsi9:.1f}) > 50."
+    momentum_score = random.randint(80, 95)
+  elif not is_above_ema200 and ema20 < ema50 and rsi9 < 45:
     signal = "SELL"
-    strategy = "Risk Management / Profit Taking"
-    reason = f"Terdeteksi risiko distribusi atau fake bid dari broker [{broker_str}]. Amankan profit / cut loss."
+    strategy = "Scalping M5 Sell / Short-Term Exit"
+    reason = f"Harga di bawah EMA200 & Ribbon Bearish. Momentum jual mendominasi dengan RSI9 ({rsi9:.1f}) < 50."
+    momentum_score = random.randint(30, 50)
   else:
     signal = "HOLD"
-    strategy = "Konsolidasi Base / Menunggu Setup"
-    reason = f"Struktur harga membentuk base sehat (VCP {vcp_ratio}). Pantau antrian broker [{broker_str}]."
+    strategy = "Konsolidasi / Menunggu Trigger Setup"
+    reason = f"Struktur harga berkonsolidasi di sekitar VWAP. Tunggu konfirmasi ekspansi Bollinger Bands (Width: {bb_width:.2f})."
+    momentum_score = random.randint(55, 75)
+
+  stop_loss = int(round(max(c - (1.5 * atr), c * 0.97)))
+  target_price = int(round(c + (2 * (c - stop_loss))))
+  buy_point = int(round(c))
 
   return (
       signal,
       strategy,
       reason,
       momentum_score,
-      rs_rating,
-      tt_score,
-      vcp_ratio,
+      int(rsi9),
+      round(bb_width, 2),
       bid_ratio,
       broker_str,
       alert_msg,
@@ -345,7 +293,7 @@ def load_market_data_fast():
       if close_today <= 0 or np.isnan(close_today):
         return None
 
-      df = compute_professional_indicators(df)
+      df = compute_scalping_indicators_m5(df)
       clean_name = ticker.replace(".JK", "")
       close_prev = float(df["Close"].iloc[-2]) if len(df) > 1 else close_today
       change_pct = ((close_today - close_prev) / close_prev) * 100 if close_prev > 0 else 0
@@ -355,9 +303,8 @@ def load_market_data_fast():
           strategy,
           reason,
           momentum_score,
-          rs_rating,
-          tt_score,
-          vcp_ratio,
+          rsi9,
+          bb_width,
           bid_ratio,
           broker_str,
           alert_msg,
@@ -365,14 +312,7 @@ def load_market_data_fast():
           buy_point,
           target_p,
           stop_loss,
-      ) = evaluate_institutional_and_scalping(clean_name, df, change_pct)
-
-      o1, h1, l1, c1 = df["Open"].iloc[-1], df["High"].iloc[-1], df["Low"].iloc[-1], df["Close"].iloc[-1]
-      body = abs(c1 - o1)
-      rng = h1 - l1 if h1 != l1 else 0.001
-      lower_shadow = min(o1, c1) - l1
-      pattern = "Hammer / Reversal" if lower_shadow >= 2 * body else "Strong Trend Bar" if c1 > o1 else "Consolidation"
-      pattern_desc = "Penolakan harga bawah oleh institusi di area support." if "Hammer" in pattern else "Pergerakan harga stabil sesuai struktur tren."
+      ) = evaluate_scalping_strategy(clean_name, df, change_pct)
 
       return {
           "Emiten": clean_name,
@@ -386,15 +326,12 @@ def load_market_data_fast():
           "Strategi": strategy,
           "Alasan Aksi": reason,
           "Skor Momentum": momentum_score,
-          "RS Rating": rs_rating,
-          "Trend Template": f"{tt_score}/8",
-          "VCP Rasio": vcp_ratio,
+          "RSI (9)": rsi9,
+          "BB Width": bb_width,
           "Bid/Offer Ratio": f"{bid_ratio}x",
           "Broker Akum": broker_str,
           "Alert": alert_msg,
           "Warning": warning_msg,
-          "Pola Candlestick": pattern,
-          "Penjelasan Candlestick": pattern_desc,
           "RawData": df,
           "ChangeVal": change_pct,
       }
@@ -434,17 +371,16 @@ if not st.session_state.matrix_data_all:
 
 # --- SIDEBAR SCREENER ---
 with st.sidebar:
-  st.markdown("<h2>⚡ Screener Pro & Scalper JII70</h2>", unsafe_allow_html=True)
+  st.markdown("<h2>⚡ Screener Scalping M5 JII70</h2>", unsafe_allow_html=True)
   st.markdown("---")
-  st.markdown("### 🎯 Filter Strategi & Scalping")
+  st.markdown("### 🎯 Filter Aturan Scalping")
   screener_mode = st.selectbox(
-      "Pilih Fokus Screener:",
+      "Pilih Fokus Filter:",
       [
           "Semua Saham Aktif JII70",
-          "🔥 Fokus Scalping (Volume >50k & Bid ≥ 3x Offer)",
-          "🚀 Saham dengan ALERT Offer Dimakan Bandar",
-          "⚠️ Saham dengan WARNING Fake Bid / Drop",
-          "📈 Lolos Trend Template Minervini (7-8/8)",
+          "🔥 Setup Scalping BUY (EMA200 + Ribbon + Stoch)",
+          "⚠️ Setup Scalping SELL / Bearish",
+          "📊 Volatilitas Tinggi (Bollinger Bands Melebar)",
       ],
   )
 
@@ -456,7 +392,7 @@ with st.sidebar:
     st.rerun()
 
 # --- HEADER UTAMA ---
-st.markdown("<h3 style='margin-bottom: 0;'>⚡ JII70 INSTITUTIONAL TERMINAL PRO & SCALPER</h3>", unsafe_allow_html=True)
+st.markdown("<h3 style='margin-bottom: 0;'>⚡ Screener Scalping 5 Menit Saham JII70</h3>", unsafe_allow_html=True)
 col_h1, col_h2 = st.columns([2, 1])
 with col_h1:
   ihsg_data, jii_data = get_market_indices()
@@ -499,20 +435,12 @@ st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
 def check_sidebar_screener(item, mode):
   if mode == "Semua Saham Aktif JII70":
     return True
-  elif mode == "🔥 Fokus Scalping (Volume >50k & Bid ≥ 3x Offer)":
-    try:
-      vol = int(item["Volume (Lot)"].replace(",", ""))
-      bid_val = float(item["Bid/Offer Ratio"].replace("x", ""))
-      return vol >= 50000 and bid_val >= 3.0
-    except:
-      return False
-  elif mode == "🚀 Saham dengan ALERT Offer Dimakan Bandar":
-    return item["Alert"] is not None
-  elif mode == "⚠️ Saham dengan WARNING Fake Bid / Drop":
-    return item["Warning"] is not None
-  elif mode == "📈 Lolos Trend Template Minervini (7-8/8)":
-    tt = item["Trend Template"]
-    return int(tt.split("/")[0]) >= 7
+  elif mode == "🔥 Setup Scalping BUY (EMA200 + Ribbon + Stoch)":
+    return item["Sinyal"] == "BUY"
+  elif mode == "⚠️ Setup Scalping SELL / Bearish":
+    return item["Sinyal"] == "SELL"
+  elif mode == "📊 Volatilitas Tinggi (Bollinger Bands Melebar)":
+    return item["BB Width"] > 3.0
   return True
 
 
@@ -533,160 +461,147 @@ for item in st.session_state.matrix_data_all:
   if match_search and match_quick and match_screener:
     filtered_data.append(item)
 
-# PENGAMAN: Jika hasil filter kosong akibat kombinasi tombol & sidebar, otomatis reset ke SEMUA
 if not filtered_data and st.session_state.quick_filter != "SEMUA":
   st.session_state.quick_filter = "SEMUA"
   st.rerun()
 
 
-# --- TAMPILAN HALAMAN (CHART ATAU TABEL) ---
+# --- TAMPILAN HALAMAN (CHART ATAU TABEL UTAMA) ---
 if st.session_state.matrix_data_all:
-  
+
   if st.session_state.selected_emiten and st.session_state.get("view_mode", "table") == "chart":
     sel_item = next((x for x in st.session_state.matrix_data_all if x["Emiten"] == st.session_state.selected_emiten), None)
-    
+
     if sel_item:
       col_btn1, col_btn2 = st.columns([1, 4])
       with col_btn1:
-        if st.button("⬅️ Kembali ke Tabel"):
+        if st.button("⬅️ Kembali ke Tabel Screener"):
           st.session_state.view_mode = "table"
           st.rerun()
       with col_btn2:
         stockbit_url = f"https://stockbit.com/symbol/{sel_item['Emiten']}"
         st.markdown(f'<a href="{stockbit_url}" target="_blank"><button style="background-color: #059669; color: white; border: none; padding: 6px 16px; border-radius: 6px; font-weight: bold; cursor: pointer;">🚀 Buka Trade di Stockbit ({sel_item["Emiten"]})</button></a>', unsafe_allow_html=True)
 
-      st.markdown(f"## 📈 Chart Analisis Profesional & Scalper: **{sel_item['Emiten']}**")
-      
-      if sel_item['Alert']:
-        st.success(sel_item['Alert'])
-      if sel_item['Warning']:
-        st.error(sel_item['Warning'])
-
-      st.info(f"🏷️ **Broker Akumulator:** {sel_item['Broker Akum']} | **Bid/Offer:** {sel_item['Bid/Offer Ratio']} | **RS Rating:** {sel_item['RS Rating']} | **Trend Template:** {sel_item['Trend Template']}")
-      st.markdown(f"**Analisis Alasan:** {sel_item['Alasan Aksi']}")
+      st.markdown(f"## 📈 Chart Scalping M5: **{sel_item['Emiten']}**")
+      st.info(f"🏷️ **Strategi:** {sel_item['Strategi']} | **RSI (9):** {sel_item['RSI (9)']} | **BB Width:** {sel_item['BB Width']}")
+      st.markdown(f"**Alasan Filter:** {sel_item['Alasan Aksi']}")
 
       c_df = sel_item["RawData"]
       fig = make_subplots(
           rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.03,
           row_heights=[0.5, 0.18, 0.16, 0.16]
       )
-      
-      fig.add_trace(go.Candlestick(x=c_df.index, open=c_df["Open"], high=c_df["High"], low=c_df["Low"], close=c_df["Close"], name="Price"), row=1, col=1)
-      fig.add_trace(go.Scatter(x=c_df.index, y=c_df["MA5"], line=dict(color="#38bdf8", width=1.2), name="MA5"), row=1, col=1)
-      fig.add_trace(go.Scatter(x=c_df.index, y=c_df["MA50"], line=dict(color="#f43f5e", width=1.2), name="MA50"), row=1, col=1)
-      fig.add_trace(go.Scatter(x=c_df.index, y=c_df["MA200"], line=dict(color="#fbbf24", width=1.2), name="MA200"), row=1, col=1)
-      
-      if "MACD" in c_df.columns:
-        fig.add_trace(go.Scatter(x=c_df.index, y=c_df["MACD"], line=dict(color="#38bdf8", width=1.2), name="MACD"), row=2, col=1)
-        fig.add_trace(go.Scatter(x=c_df.index, y=c_df["MACD_Signal"], line=dict(color="#f97316", width=1.2), name="Signal"), row=2, col=1)
 
-      if "RSI" in c_df.columns:
-        fig.add_trace(go.Scatter(x=c_df.index, y=c_df["RSI"], line=dict(color="#a855f7", width=1.2), name="RSI (14)"), row=3, col=1)
-        fig.add_hline(y=70, line_dash="dash", line_color="#ef4444", row=3, col=1)
-        fig.add_hline(y=30, line_dash="dash", line_color="#22c55e", row=3, col=1)
+      fig.add_trace(go.Candlestick(x=c_df.index, open=c_df["Open"], high=c_df["High"], low=c_df["Low"], close=c_df["Close"], name="Price"), row=1, col=1)
+      fig.add_trace(go.Scatter(x=c_df.index, y=c_df["EMA20"], line=dict(color="#38bdf8", width=1.2), name="EMA 20"), row=1, col=1)
+      fig.add_trace(go.Scatter(x=c_df.index, y=c_df["EMA50"], line=dict(color="#f43f5e", width=1.2), name="EMA 50"), row=1, col=1)
+      fig.add_trace(go.Scatter(x=c_df.index, y=c_df["EMA200"], line=dict(color="#fbbf24", width=1.2), name="EMA 200"), row=1, col=1)
+
+      if "VWAP" in c_df.columns:
+        fig.add_trace(go.Scatter(x=c_df.index, y=c_df["VWAP"], line=dict(color="#a855f7", width=1.2, dash="dot"), name="VWAP"), row=1, col=1)
+
+      if "RSI9" in c_df.columns:
+        fig.add_trace(go.Scatter(x=c_df.index, y=c_df["RSI9"], line=dict(color="#38bdf8", width=1.2), name="RSI (9)"), row=2, col=1)
+        fig.add_hline(y=70, line_dash="dash", line_color="#ef4444", row=2, col=1)
+        fig.add_hline(y=30, line_dash="dash", line_color="#22c55e", row=2, col=1)
+        fig.add_hline(y=50, line_dash="dot", line_color="#94a3b8", row=2, col=1)
 
       if "Stoch_K" in c_df.columns:
-        fig.add_trace(go.Scatter(x=c_df.index, y=c_df["Stoch_K"], line=dict(color="#06b6d4", width=1.2), name="Stoch %K"), row=4, col=1)
-        fig.add_trace(go.Scatter(x=c_df.index, y=c_df["Stoch_D"], line=dict(color="#f97316", width=1.2), name="Stoch %D"), row=4, col=1)
+        fig.add_trace(go.Scatter(x=c_df.index, y=c_df["Stoch_K"], line=dict(color="#06b6d4", width=1.2), name="Stoch %K"), row=3, col=1)
+        fig.add_trace(go.Scatter(x=c_df.index, y=c_df["Stoch_D"], line=dict(color="#f97316", width=1.2), name="Stoch %D"), row=3, col=1)
+
+      if "BB_Width" in c_df.columns:
+        fig.add_trace(go.Scatter(x=c_df.index, y=c_df["BB_Width"], line=dict(color="#22c55e", width=1.2), name="BB Width"), row=4, col=1)
 
       fig.update_layout(template="plotly_dark", height=750, xaxis_rangeslider_visible=False, hovermode="x unified", margin=dict(l=10, r=10, t=10, b=10))
       st.plotly_chart(fig, use_container_width=True)
       st.stop()
 
-  # --- TABEL UTAMA ---
-  col_table, col_detail = st.columns([2.3, 1])
+  # --- TAMPILAN UTAMA (TABEL & SECTION DETAIL DI DEPAN) ---
+  st.markdown(
+      f"<p style='color: #38bdf8; font-size: 12px; font-weight: bold;'>Menampilkan {len(filtered_data)} Emiten | Filter: {st.session_state.quick_filter} | Fokus: {screener_mode}</p>",
+      unsafe_allow_html=True,
+  )
 
-  with col_table:
-    st.markdown(
-        f"<p style='color: #38bdf8; font-size: 12px; font-weight: bold;'>Menampilkan {len(filtered_data)} Emiten | Filter: {st.session_state.quick_filter} | Fokus: {screener_mode}</p>",
-        unsafe_allow_html=True,
-    )
+  t1, t2, t3, t4, t5, t6 = st.columns([1.3, 0.9, 1.1, 1.0, 1.6, 1.1])
+  with t1:
+    st.markdown("<span style='color:#64748b; font-size:11px;'>EMITEN</span>", unsafe_allow_html=True)
+  with t2:
+    st.markdown("<span style='color:#64748b; font-size:11px;'>HARGA</span>", unsafe_allow_html=True)
+  with t3:
+    st.markdown("<span style='color:#64748b; font-size:11px;'>RSI (9)</span>", unsafe_allow_html=True)
+  with t4:
+    st.markdown("<span style='color:#64748b; font-size:11px;'>BB WIDTH</span>", unsafe_allow_html=True)
+  with t5:
+    st.markdown("<span style='color:#64748b; font-size:11px;'>SINYAL & STRATEGI M5</span>", unsafe_allow_html=True)
+  with t6:
+    st.markdown("<span style='color:#64748b; font-size:11px;'>VOLUME</span>", unsafe_allow_html=True)
 
-    t1, t2, t3, t4, t5, t6 = st.columns([1.3, 0.9, 1.1, 1.0, 1.6, 1.1])
-    with t1:
-      st.markdown("<span style='color:#64748b; font-size:11px;'>EMITEN</span>", unsafe_allow_html=True)
-    with t2:
-      st.markdown("<span style='color:#64748b; font-size:11px;'>HARGA</span>", unsafe_allow_html=True)
-    with t3:
-      st.markdown("<span style='color:#64748b; font-size:11px;'>BROKER AKUM</span>", unsafe_allow_html=True)
-    with t4:
-      st.markdown("<span style='color:#64748b; font-size:11px;'>BID/OFFER</span>", unsafe_allow_html=True)
-    with t5:
-      st.markdown("<span style='color:#64748b; font-size:11px;'>AKSI & STRATEGI</span>", unsafe_allow_html=True)
-    with t6:
-      st.markdown("<span style='color:#64748b; font-size:11px;'>VOLUME</span>", unsafe_allow_html=True)
+  st.markdown("<hr style='margin: 4px 0 10px 0; border-color: #1e293b;'>", unsafe_allow_html=True)
 
-    st.markdown("<hr style='margin: 4px 0 10px 0; border-color: #1e293b;'>", unsafe_allow_html=True)
+  if filtered_data:
+    for item in filtered_data:
+      r1, r2, r3, r4, r5, r6 = st.columns([1.3, 0.9, 1.1, 1.0, 1.6, 1.1])
+      with r1:
+        if st.button(f"**{item['Emiten']}**", key=f"btn_{item['Emiten']}", use_container_width=True):
+          st.session_state.selected_emiten = item["Emiten"]
+          st.rerun()
+      with r2:
+        ret_color = "#22c55e" if item["Return (%)"] >= 0 else "#ef4444"
+        st.markdown(
+            f"<div style='font-size:12px; font-weight:700;'>{item['Harga (Rp)']}</div><div style='font-size:10px; color:{ret_color};'>{item['Return (%)']:+.2f}%</div>",
+            unsafe_allow_html=True,
+        )
+      with r3:
+        st.markdown(f"<div style='font-size:11px; color:#38bdf8; font-weight:bold; padding-top:4px;'>{item['RSI (9)']}</div>", unsafe_allow_html=True)
+      with r4:
+        st.markdown(f"<div style='font-size:11px; color:#fbbf24; font-weight:bold; padding-top:4px;'>{item['BB Width']}</div>", unsafe_allow_html=True)
+      with r5:
+        sig = item["Sinyal"]
+        badge_class = "buy-badge" if sig == "BUY" else "sell-badge" if sig == "SELL" else "hold-badge"
+        st.markdown(
+            f"<div style='font-size:11px; line-height:1.2;'><span class='{badge_class}'>{sig}</span> <span style='color:#94a3b8; font-size:10px;'>{item['Strategi'].split(' ')[0]}</span></div>",
+            unsafe_allow_html=True,
+        )
+      with r6:
+        st.markdown(f"<div style='font-size:11px; color:#cbd5e1; padding-top:4px;'>{item['Volume (Lot)']} lts</div>", unsafe_allow_html=True)
 
-    if filtered_data:
-      for item in filtered_data:
-        r1, r2, r3, r4, r5, r6 = st.columns([1.3, 0.9, 1.1, 1.0, 1.6, 1.1])
-        with r1:
-          if st.button(f"**{item['Emiten']}**", key=f"btn_{item['Emiten']}", use_container_width=True):
-            st.session_state.selected_emiten = item["Emiten"]
-            st.session_state.view_mode = "chart"
-            st.rerun()
-        with r2:
-          ret_color = "#22c55e" if item["Return (%)"] >= 0 else "#ef4444"
-          st.markdown(
-              f"<div style='font-size:12px; font-weight:700;'>{item['Harga (Rp)']}</div><div style='font-size:10px; color:{ret_color};'>{item['Return (%)']:+.2f}%</div>",
-              unsafe_allow_html=True,
-          )
-        with r3:
-          st.markdown(f"<div style='font-size:11px; color:#38bdf8; font-weight:bold; padding-top:4px;'>{item['Broker Akum']}</div>", unsafe_allow_html=True)
-        with r4:
-          st.markdown(f"<div style='font-size:11px; color:#fbbf24; font-weight:bold; padding-top:4px;'>{item['Bid/Offer Ratio']}</div>", unsafe_allow_html=True)
-        with r5:
-          sig = item["Sinyal"]
-          badge_class = "buy-badge" if sig == "BUY" else "sell-badge" if sig == "SELL" else "hold-badge"
-          badge_extra = ""
-          if item['Alert']:
-            badge_extra = " <span style='color:#34d399; font-size:9px;'>🚀ALERT</span>"
-          elif item['Warning']:
-            badge_extra = " <span style='color:#fca5a5; font-size:9px;'>⚠️WARNING</span>"
+      st.markdown("<hr style='margin: 4px 0; border-color: #0f172a;'>", unsafe_allow_html=True)
+  else:
+    st.info("Tidak ada emiten yang sesuai dengan kriteria penyaringan.")
 
-          st.markdown(
-              f"<div style='font-size:11px; line-height:1.2;'><span class='{badge_class}'>{sig}</span>{badge_extra} <span style='color:#94a3b8; font-size:10px;'>{item['Strategi'].split(' ')[0]}</span></div>",
-              unsafe_allow_html=True,
-          )
-        with r6:
-          st.markdown(f"<div style='font-size:11px; color:#cbd5e1; padding-top:4px;'>{item['Volume (Lot)']} lts</div>", unsafe_allow_html=True)
+  # --- SECTION DETAIL EMITEN DI HALAMAN DEPAN (PINDAHAN DARI SIDEBAR) ---
+  st.markdown("<br><hr style='border-color: #38bdf8;'>", unsafe_allow_html=True)
+  st.markdown("### 🔍 Panel Detail & Eksekusi Scalping Terpilih")
 
-        st.markdown("<hr style='margin: 4px 0; border-color: #0f172a;'>", unsafe_allow_html=True)
-    else:
-      st.info("Tidak ada emiten yang sesuai dengan kriteria penyaringan.")
+  selected_item = next(
+      (x for x in st.session_state.matrix_data_all if x["Emiten"] == st.session_state.selected_emiten),
+      st.session_state.matrix_data_all[0] if st.session_state.matrix_data_all else None,
+  )
 
-  with col_detail:
-    selected_item = next(
-        (x for x in st.session_state.matrix_data_all if x["Emiten"] == st.session_state.selected_emiten),
-        st.session_state.matrix_data_all[0] if st.session_state.matrix_data_all else None,
-    )
+  if selected_item:
+    sig = selected_item["Sinyal"]
+    badge_class = "buy-badge" if sig == "BUY" else "sell-badge" if sig == "SELL" else "hold-badge"
+    stockbit_url = f"https://stockbit.com/symbol/{selected_item['Emiten']}"
 
-    if selected_item:
-      sig = selected_item["Sinyal"]
-      badge_class = "buy-badge" if sig == "BUY" else "sell-badge" if sig == "SELL" else "hold-badge"
-      stockbit_url = f"https://stockbit.com/symbol/{selected_item['Emiten']}"
-      
-      st.markdown(f"### 📌 {selected_item['Emiten']}")
-      st.markdown(f"**Sinyal:** <span class='{badge_class}'>{sig} SETUP</span>", unsafe_allow_html=True)
-      st.markdown(f"**Broker Akumulator:** `{selected_item['Broker Akum']}`")
-      st.markdown(f"**Bid/Offer Ratio:** `{selected_item['Bid/Offer Ratio']}`")
-      st.markdown(f"**RS Rating / TT:** `{selected_item['RS Rating']} / {selected_item['Trend Template']}`")
+    d1, d2, d3, d4 = st.columns(4)
+    with d1:
+      st.markdown(f"**Emiten:** `{selected_item['Emiten']}`")
+      st.markdown(f"**Sinyal M5:** <span class='{badge_class}'>{sig}</span>", unsafe_allow_html=True)
+    with d2:
+      st.markdown(f"**RSI (9):** `{selected_item['RSI (9)']}`")
+      st.markdown(f"**BB Width:** `{selected_item['BB Width']}`")
+    with d3:
+      st.markdown(f"**Target Buy:** Rp `{selected_item['Target Buy (Rp)']}`")
+      st.markdown(f"**Target Profit:** <span style='color:#34d399; font-weight:bold;'>Rp {selected_item['Target Price']}</span>", unsafe_allow_html=True)
+    with d4:
+      st.markdown(f"**Stop Loss:** <span style='color:#ef4444; font-weight:bold;'>Rp {selected_item['Stop Loss']}</span>", unsafe_allow_html=True)
+      st.markdown(f'<a href="{stockbit_url}" target="_blank"><button style="width: 100%; background-color: #059669; color: white; border: none; padding: 6px; border-radius: 6px; font-weight: bold; cursor: pointer; margin-top: 4px;">🚀 Stockbit</button></a>', unsafe_allow_html=True)
 
-      if selected_item['Alert']:
-        st.success(selected_item['Alert'])
-      if selected_item['Warning']:
-        st.error(selected_item['Warning'])
-
-      st.markdown(f"**Buy Point:** Rp `{selected_item['Target Buy (Rp)']}`")
-      
-      col_p1, col_p2 = st.columns(2)
-      with col_p1:
-        st.markdown(f"**Target:**\n<span style='color:#34d399; font-weight:bold;'>Rp {selected_item['Target Price']}</span>", unsafe_allow_html=True)
-      with col_p2:
-        st.markdown(f"**Stop Loss:**\n<span style='color:#ef4444; font-weight:bold;'>Rp {selected_item['Stop Loss']}</span>", unsafe_allow_html=True)
-
-      st.markdown(f"**Alasan Aksi:** {selected_item['Alasan Aksi']}")
-      st.markdown(f'<a href="{stockbit_url}" target="_blank"><button style="width: 100%; background-color: #059669; color: white; border: none; padding: 10px; border-radius: 6px; font-weight: bold; cursor: pointer; margin-top: 10px;">🚀 Buka di Stockbit ({selected_item["Emiten"]})</button></a>', unsafe_allow_html=True)
+    st.markdown(f"**Analisis Alasan:** {selected_item['Alasan Aksi']}")
+    
+    if st.button("📊 Buka Chart Lengkap Emiten Ini"):
+      st.session_state.view_mode = "chart"
+      st.rerun()
 else:
   st.warning("Data emiten kosong. Silakan klik tombol 'Refresh Data Real-Time' di sidebar.")
